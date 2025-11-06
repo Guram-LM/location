@@ -1,5 +1,13 @@
-import { useState } from "react";
-import { MapPin, Loader2, CheckCircle, XCircle, AlertCircle } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import {
+  MapPin,
+  Loader2,
+  CheckCircle,
+  XCircle,
+  AlertCircle,
+  Mic,
+  MicOff,
+} from "lucide-react";
 
 interface FormData {
   country: string;
@@ -21,6 +29,53 @@ interface ReverseGeocodeResponse {
   number?: string;
 }
 
+interface SpeechRecognition extends EventTarget {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any) | null;
+  onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any) | null;
+  onend: ((this: SpeechRecognition, ev: Event) => any) | null;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+
+interface SpeechRecognitionResultList {
+  length: number;
+  item(index: number): SpeechRecognitionResult;
+  [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionResult {
+  isFinal: boolean;
+  length: number;
+  item(index: number): SpeechRecognitionAlternative;
+  [index: number]: SpeechRecognitionAlternative;
+}
+
+interface SpeechRecognitionAlternative {
+  transcript: string;
+  confidence: number;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message?: string;
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition: new () => SpeechRecognition;
+    webkitSpeechRecognition: new () => SpeechRecognition;
+  }
+}
+
 const t = {
   ka: {
     title: "მისამართის ვალიდაცია",
@@ -37,6 +92,10 @@ const t = {
     detecting: "ლოკაციის აღმოჩენა...",
     locationError: "ვერ მოხერხდა ლოკაციის აღმოჩენა",
     serverError: "სერვერთან დაკავშირება ვერ მოხერხდა",
+    speakCountry: "თქვი ქვეყანა...",
+    speakCity: "თქვი ქალაქი...",
+    speakStreet: "თქვი ქუჩა...",
+    speakNumber: "თქვი ნომერი...",
   },
   en: {
     title: "Address Validation",
@@ -53,6 +112,10 @@ const t = {
     detecting: "Detecting location...",
     locationError: "Failed to detect location",
     serverError: "Failed to connect to server",
+    speakCountry: "Say country...",
+    speakCity: "Say city...",
+    speakStreet: "Say street...",
+    speakNumber: "Say number...",
   },
 };
 
@@ -60,19 +123,87 @@ export default function App() {
   const [lang, setLang] = useState<"ka" | "en">("ka");
   const [useAutoLocation, setUseAutoLocation] = useState(false);
   const [loadingLocation, setLoadingLocation] = useState(false);
-  const [form, setForm] = useState<FormData>({
-    country: "",
-    city: "",
-    street: "",
-    number: "",
-  });
+  const [form, setForm] = useState<FormData>({ country: "", city: "", street: "", number: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [listeningField, setListeningField] = useState<string | null>(null);
 
-  const getText = (key: keyof typeof t.ka): string => t[lang][key];
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const currentFieldIndex = useRef(0);
+  const isSpeakingRef = useRef(false);
+
+  const fields = ["country", "city", "street", "number"] as const;
+  type FieldKey = (typeof fields)[number];
+
+  const getText = (key: keyof typeof t.ka) => t[lang][key];
 
   const toggleLang = () => setLang(lang === "ka" ? "en" : "ka");
+
+
+  useEffect(() => {
+    const SpeechRecognitionAPI = window.SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionAPI) return;
+
+    const recognition = new SpeechRecognitionAPI() as SpeechRecognition;
+    recognition.lang = lang === "ka" ? "ka-GE" : "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const text = event.results[0][0].transcript.trim();
+      const field = fields[currentFieldIndex.current];
+      setForm(prev => ({ ...prev, [field]: text }));
+      setListeningField(null);
+    };
+
+    recognition.onerror = () => setListeningField(null);
+    recognition.onend = () => setListeningField(null);
+
+    recognitionRef.current = recognition;
+  }, [lang]);
+
+
+  const speak = (text: string) => {
+    if (isSpeakingRef.current) speechSynthesis.cancel();
+    isSpeakingRef.current = true;
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = lang === "ka" ? "ka-GE" : "en-US";
+    utterance.rate = 0.9;
+
+    utterance.onend = () => {
+      isSpeakingRef.current = false;
+    };
+
+    speechSynthesis.speak(utterance);
+  };
+
+
+  const startVoiceListening = (field: FieldKey) => {
+    if (!recognitionRef.current || listeningField) return;
+
+    const index = fields.indexOf(field);
+    currentFieldIndex.current = index;
+    setListeningField(field);
+
+
+    speak(getText(`speak${field.charAt(0).toUpperCase() + field.slice(1)}` as any));
+
+  
+    const interval = setInterval(() => {
+      if (!isSpeakingRef.current) {
+        clearInterval(interval);
+        recognitionRef.current?.start();
+
+
+        setTimeout(() => {
+          if (listeningField === field) setListeningField(null);
+        }, 10000);
+      }
+    }, 200);
+  };
+
 
   const detectLocation = async () => {
     setLoadingLocation(true);
@@ -102,9 +233,7 @@ export default function App() {
         body: JSON.stringify({ latitude, longitude, lang }),
       });
 
-      if (!response.ok) {
-        throw new Error("Network response was not ok");
-      }
+      if (!response.ok) throw new Error("Network error");
 
       const data: ReverseGeocodeResponse = await response.json();
 
@@ -116,8 +245,7 @@ export default function App() {
       });
 
       setUseAutoLocation(true);
-    } catch (error) {
-      console.error("Geolocation error:", error);
+    } catch {
       alert(getText("locationError"));
     } finally {
       setLoadingLocation(false);
@@ -126,10 +254,8 @@ export default function App() {
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-    setForm((prev) => ({ ...prev, [name]: value }));
-    if (errors[name]) {
-      setErrors((prev) => ({ ...prev, [name]: "" }));
-    }
+    setForm(prev => ({ ...prev, [name]: value }));
+    if (errors[name]) setErrors(prev => ({ ...prev, [name]: "" }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -146,15 +272,9 @@ export default function App() {
       });
 
       const data: ValidationResult = await response.json();
-
-      if (data.valid) {
-        setResult(data);
-      } else {
-        setErrors(data.errors || {});
-        setResult(data);
-      }
-    } catch (error) {
-      console.error("Validation error:", error);
+      setResult(data);
+      if (!data.valid) setErrors(data.errors || {});
+    } catch {
       alert(getText("serverError"));
     } finally {
       setLoading(false);
@@ -166,6 +286,7 @@ export default function App() {
     setForm({ country: "", city: "", street: "", number: "" });
     setErrors({});
     setResult(null);
+    currentFieldIndex.current = 0;
   };
 
   return (
@@ -199,6 +320,7 @@ export default function App() {
               </>
             )}
           </button>
+
           <button
             onClick={resetForm}
             className="flex-1 bg-gray-600 text-white rounded-xl py-3 hover:bg-gray-700 transition"
@@ -208,24 +330,39 @@ export default function App() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {["country", "city", "street", "number"].map((field) => (
-            <div key={field}>
-              <input
-                name={field}
-                value={form[field as keyof FormData]}
-                onChange={handleChange}
-                placeholder={getText(field as keyof typeof t.ka)}
-                className={`w-full border-2 rounded-xl p-3 transition ${
-                  errors[field] ? "border-red-500" : "border-gray-300"
-                } focus:border-indigo-500 focus:outline-none`}
-                disabled={useAutoLocation && loadingLocation}
-              />
-              {errors[field] && (
-                <div className="flex items-center gap-2 mt-2 text-red-600 text-sm">
-                  <AlertCircle className="w-4 h-4" />
-                  {errors[field]}
-                </div>
-              )}
+          {fields.map((field) => (
+            <div key={field} className="flex gap-2 items-start">
+              <div className="flex-1">
+                <input
+                  name={field}
+                  value={form[field]}
+                  onChange={handleChange}
+                  placeholder={getText(field)}
+                  className={`w-full border-2 rounded-xl p-3 transition ${
+                    errors[field] ? "border-red-500" : "border-gray-300"
+                  } focus:border-indigo-500 focus:outline-none`}
+                  disabled={useAutoLocation && loadingLocation}
+                />
+                {errors[field] && (
+                  <div className="flex items-center gap-2 mt-1 text-red-600 text-sm">
+                    <AlertCircle className="w-4 h-4" />
+                    {errors[field]}
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => startVoiceListening(field)}
+                disabled={!!listeningField && listeningField !== field}
+                className={`p-3 rounded-xl transition flex items-center justify-center ${
+                  listeningField === field
+                    ? "bg-red-500 text-white animate-pulse"
+                    : "bg-indigo-600 text-white hover:bg-indigo-700"
+                } disabled:opacity-50`}
+              >
+                {listeningField === field ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              </button>
             </div>
           ))}
 
